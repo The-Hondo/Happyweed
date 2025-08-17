@@ -1,15 +1,35 @@
 # src/happyweed/mapgen/generator.py
-# Exact wrapper around your proven generator.
-from importlib import import_module
+# Exact wrapper around your proven generator, with robust import for CI.
 
-try:
-    TW = import_module("TheWinner2")  # expects TheWinner2.py at repo root
-except Exception as e:
+import os, sys, importlib.util
+
+def _load_twinner2():
+    # First try a normal import (works locally when CWD is repo root)
+    try:
+        return __import__("TheWinner2")
+    except ModuleNotFoundError:
+        pass
+
+    # Fallbacks: look relative to this file and the repo root (CI-safe)
+    here = os.path.abspath(os.path.dirname(__file__))
+    candidates = [
+        os.path.normpath(os.path.join(here, "../../../TheWinner2.py")),  # repo root relative to src/happyweed/mapgen
+        os.path.normpath(os.path.join(os.getcwd(), "TheWinner2.py")),   # current working dir
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            spec = importlib.util.spec_from_file_location("TheWinner2", p)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+
+    # Last resort: helpful error
     raise RuntimeError(
-        "Could not import TheWinner2.py. Place it at the repo root."
-    ) from e
+        "Could not locate TheWinner2.py. Place it at the repo root (same level as src/, data/, tools/)."
+    )
+
+TW = _load_twinner2()
 
 def generate_grid(level_set: int, level: int):
     seed = TW.seed_from_set_level(level_set, level)
-    grid = TW.generate_level(level_set, level, seed=seed)
-    return grid  # already 20×12, headerless
+    return TW.generate_level(level_set, level, seed=seed)

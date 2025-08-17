@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "happyweed"
+version = "0.1.0"
+description = "Pixel-perfect reimplementation of Happyweed! (1993) — canonical Original mode with optional Extended features."
+readme = "README.md"
+authors = [{name="Happyweed Reimplementation Team"}]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.urls]
+Homepage = "https://example.com"

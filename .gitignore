@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.venv*/
+env/
+build/
+dist/
+*.egg-info/
+
+# Outputs
+out/
+data/golden_levels/**/.DS_Store
+*.xlsx
+*.zip
+
+# IDE
+.vscode/
+.idea/

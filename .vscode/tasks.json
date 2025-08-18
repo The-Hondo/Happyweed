@@ -1,0 +1,25 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Tests",
+      "type": "shell",
+      "command": "pytest -q",
+      "options": { "env": { "PYTHONPATH": "." } },
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Verify set 41 vs goldens",
+      "type": "shell",
+      "command": "py tools\\hwtool.py verify --set 41 --dir data\\golden_levels",
+      "problemMatcher": []
+    },
+    {
+      "label": "Render set 41 PNGs",
+      "type": "shell",
+      "command": "py tools\\render_grid.py --set 41 --indir data\\golden_levels --outdir out\\png --tile 16",
+      "problemMatcher": []
+    }
+  ]
+}

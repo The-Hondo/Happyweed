@@ -1,0 +1,30 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug pytest",
+      "type": "python",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-q"],
+      "console": "integratedTerminal",
+      "env": { "PYTHONPATH": "." }
+    },
+    {
+      "name": "Viewer (TSV, set 41)",
+      "type": "python",
+      "request": "launch",
+      "program": "tools/run_viewer.py",
+      "args": ["--set", "41", "--source", "tsv", "--tile", "16"],
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Render set 41 to PNG",
+      "type": "python",
+      "request": "launch",
+      "program": "tools/render_grid.py",
+      "args": ["--set", "41", "--indir", "data/golden_levels", "--outdir", "out/png", "--tile", "16"],
+      "console": "integratedTerminal"
+    }
+  ]
+}

@@ -15,5 +15,11 @@ data/golden_levels/**/.DS_Store
 *.zip
 
 # IDE
-.vscode/
 .idea/
+
+# Keep VS Code project files
+!.vscode/
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+

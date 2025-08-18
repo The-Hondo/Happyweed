@@ -1,35 +1,18 @@
 # src/happyweed/mapgen/generator.py
-# Exact wrapper around your proven generator, with robust import for CI.
+# Canonical level generator using our reimplementation (no TheWinner2 dependency).
 
-import os, sys, importlib.util
+from ..rng import PMRandom, seed_from_set_level
+from ..tiles import wall_for_level
+from .carve import carve_leaf_grid
+from .placement import apply_all_placements
+from .jail import place_jail
 
-def _load_twinner2():
-    # First try a normal import (works locally when CWD is repo root)
-    try:
-        return __import__("TheWinner2")
-    except ModuleNotFoundError:
-        pass
-
-    # Fallbacks: look relative to this file and the repo root (CI-safe)
-    here = os.path.abspath(os.path.dirname(__file__))
-    candidates = [
-        os.path.normpath(os.path.join(here, "../../../TheWinner2.py")),  # repo root relative to src/happyweed/mapgen
-        os.path.normpath(os.path.join(os.getcwd(), "TheWinner2.py")),   # current working dir
-    ]
-    for p in candidates:
-        if os.path.exists(p):
-            spec = importlib.util.spec_from_file_location("TheWinner2", p)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            return mod
-
-    # Last resort: helpful error
-    raise RuntimeError(
-        "Could not locate TheWinner2.py. Place it at the repo root (same level as src/, data/, tools/)."
-    )
-
-TW = _load_twinner2()
 
 def generate_grid(level_set: int, level: int):
-    seed = TW.seed_from_set_level(level_set, level)
-    return TW.generate_level(level_set, level, seed=seed)
+    seed = seed_from_set_level(level_set, level)   # ← use closed-form
+    rng = PMRandom(seed & 0x7FFFFFFF)
+
+    grid = carve_leaf_grid(level, rng, mode="steps", steps_cap=135)
+    apply_all_placements(grid, rng, level)
+    place_jail(grid, rng, level)
+    return grid

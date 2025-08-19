@@ -1,0 +1,10 @@
+﻿address,subroutine,symbol_or_pseudoname,behavior_summary,mirrors_in_code,tests_covering,notes
+0x56C2,sub_56C2,rand_bounded,"low16(signed)→abs→%N→+1",happyweed/rng.py::PMRandom.bounded; low16_signed_abs,tests/test_rng.py; parity,
+0x74C6,sub_74C6,is_open,"tile 10..199 are open",happyweed/tiles.py::is_open,tests/test_tiles.py; parity,
+0x879A,sub_879A,gen_driver,"carve→super(s)→cops×3→exit→player→jail",mapgen/generator.py; placement.py; jail.py,tests/test_full_vs_tw.py,
+0x87XX,apply_turn,apply_turn_code,"turn codes 0..3; prevent reverse",mapgen/carve.py::apply_turn_code,tests/test_carve_vs_tw.py,update addr when known
+0x88XX,carve_loop,carve_leaf_grid,"start x∈[4..17],y∈[4..11]; cap 135; optional tick cutoff",mapgen/carve.py,tests/test_carve_vs_tw.py; tests/test_timing_tickcount.py,
+0x89BC,sub_89BC,place_random_item,"wall + open neighbor; x∈[2..18],y∈[2..11]",mapgen/placement.py::place_random_item,tests/test_full_vs_tw.py,
+0x8Axx,sub_8A??,super_count,"1..3 by level band; super tile fallback",mapgen/placement.py::apply_all_placements,tests/test_full_vs_tw.py,
+0x8AAC,sub_8AAC,place_jail,"2×2 walls; TL in [2..17]×[2..10]; BR has open neighbor; write 250..253",mapgen/jail.py::place_jail,tests/test_full_vs_tw.py,
+seed,seed_calc,seed_from_set_level,"closed-form pre-call seed using pm_prev/INV_A",rng.py::seed_from_set_level,tests/test_full_vs_tw.py; tests/test_golden_levels.py,

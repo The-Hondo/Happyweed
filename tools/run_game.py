@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# Minimal fixed-60 Hz runtime scaffold:
+# Minimal fixed-60 Hz runtime scaffold + player movement:
 # - draws our generated grid exactly
-# - optional HUD digits (top-left inside the grid)
-# - bottom status bar using ui/status_bar.py
-# - keyboard: arrows = level nav, H = toggle HUD, B = toggle status bar, Esc = quit
+# - finds PLAYER start from the grid placement
+# - replaces start cell with OPEN floor (tile 10) so movement rules are correct
+# - tick-based player steps with strict "open = 10..199" rule
+# - HUD digits toggle (H) + placeholder status bar (B)
+# - Arrows = set desired direction; PageUp/PageDown = change level; Esc = quit
 
 import argparse
 import pygame
@@ -11,6 +13,14 @@ import pygame
 from happyweed.mapgen.generator import generate_grid
 from happyweed.render.tileset import Tileset
 from happyweed.ui.status_bar import StatusBarState, render_status_bar
+from happyweed.tiles import PLAYER  # and your asset defines; floor/open is tile 10 by convention
+
+from happyweed.engine.player import (
+    PlayerState, DIR_LEFT, DIR_RIGHT, DIR_UP, DIR_DOWN,
+    set_desired, update_player, find_player_start
+)
+
+OPEN_FLOOR = 10  # canonical "open" tile (strict open range is 10..199)
 
 def bake_level_digits_inplace(grid, level_idx: int):
     """Write zero-padded 3 digits into [0][0..2]; matches original in-grid HUD."""
@@ -44,10 +54,24 @@ def main():
 
     level_set, level = args.set, args.level
 
-    def load_grid():
-        return generate_grid(level_set, level)
+    def load_grid_and_spawn():
+        """Generate grid, locate player start, and restore that cell to OPEN_FLOOR (10)."""
+        g = generate_grid(level_set, level)
+        sx, sy = find_player_start(g, PLAYER)
+        if (sx, sy) == (-1, -1):
+            # Fallback: if no PLAYER tile (shouldn't happen), park at first open cell
+            for yy in range(12):
+                for xx in range(20):
+                    if 10 <= g[yy][xx] <= 199:
+                        sx, sy = xx, yy
+                        break
+                if sx != -1:
+                    break
+        # Replace the PLAYER tile in the grid with open floor so movement rules operate correctly
+        g[sy][sx] = OPEN_FLOOR
+        return g, PlayerState(x=sx, y=sy, dir=None, desired=None)
 
-    grid = load_grid()
+    grid, player = load_grid_and_spawn()
     hud_on = args.hud
     bar_on = args.statusbar
     status = StatusBarState(time_ticks=0, score=0, lives=3, super_count=0)
@@ -60,12 +84,16 @@ def main():
             elif ev.type == pygame.KEYDOWN:
                 if ev.key == pygame.K_ESCAPE:
                     running = False
-                elif ev.key in (pygame.K_RIGHT, pygame.K_PAGEUP):
+
+                # Level navigation: use PageUp/PageDown ONLY (leave arrows for movement)
+                elif ev.key == pygame.K_PAGEUP:
                     level = 1 if level == 25 else level + 1
-                    grid = load_grid()
-                elif ev.key in (pygame.K_LEFT, pygame.K_PAGEDOWN):
+                    grid, player = load_grid_and_spawn()
+                elif ev.key == pygame.K_PAGEDOWN:
                     level = 25 if level == 1 else level - 1
-                    grid = load_grid()
+                    grid, player = load_grid_and_spawn()
+
+                # UI toggles
                 elif ev.key == pygame.K_h:
                     hud_on = not hud_on
                 elif ev.key == pygame.K_b:
@@ -75,26 +103,42 @@ def main():
                         status_h = new_h
                         screen = pygame.display.set_mode((W, H + status_h))
 
+                # Steering: buffer a desired direction (Pac-man style)
+                elif ev.key == pygame.K_LEFT:
+                    set_desired(player, DIR_LEFT)
+                elif ev.key == pygame.K_RIGHT:
+                    set_desired(player, DIR_RIGHT)
+                elif ev.key == pygame.K_UP:
+                    set_desired(player, DIR_UP)
+                elif ev.key == pygame.K_DOWN:
+                    set_desired(player, DIR_DOWN)
+
         # Placeholder time counter (real game will drive this later)
         status.time_ticks = (status.time_ticks + 1) % 1000
 
-        # Prepare a copy if HUD overlay is enabled (don’t mutate base grid)
+        # Advance player by one tick (one tile at most)
+        update_player(grid, player)
+
+        # Prepare draw copy if HUD overlay is enabled (don’t mutate base grid)
         draw_grid = grid
         if hud_on:
             draw_grid = [row[:] for row in grid]
             bake_level_digits_inplace(draw_grid, level)
 
-        # Draw
+        # Draw map
         screen.fill((0, 0, 0))
         for y in range(12):
             for x in range(20):
                 screen.blit(get_tile_surface(draw_grid[y][x]), (x * args.tile, y * args.tile))
 
+        # Draw player sprite (uses the PLAYER tile image on top of the map)
+        screen.blit(get_tile_surface(PLAYER), (player.x * args.tile, player.y * args.tile))
+
         if bar_on:
             render_status_bar(screen, (0, 12 * args.tile), args.tile, get_tile_surface, state=status)
 
         pygame.display.set_caption(
-            f"Happyweed Runtime — Set {level_set}  Level {level}  HUD:{hud_on}  BAR:{bar_on}"
+            f"Happyweed Runtime — Set {level_set}  Level {level}  HUD:{hud_on}  BAR:{bar_on}  Pos:({player.x},{player.y})"
         )
         pygame.display.flip()
         clock.tick(60)  # fixed 60 Hz

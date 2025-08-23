@@ -1,27 +1,6 @@
 # src/happyweed/engine/cop.py
 # LST-style cop engine (direction priority + phasing) with a provisional roam/chase gate
-# ----------------------------------------------------------------------------
-# What is LST-accurate here
-# - Cops may overlap tiles; no occupancy map. (Matches ROM behavior and scoring overlay rules.)
-# - Passability for cops: treat 10..199 and 241..249 as passable; jail (>=250) passable for cops.
-#   (We delegate to collisions.is_passable_runtime("cop", ...), which mirrors sub_74C6.)
-# - Direction priority mirrors sub_7A1E intent / sub_7B54 commit:
-#     1) Straight-ahead if it reduces |dx|+|dy| (bias to continue)
-#     2) Primary axis toward player (|dx|>=|dy| → horizontal, else vertical)
-#     3) Perpendicular toward-player, then its opposite
-#     4) Reversal last (only when boxed in)
-#   A tiny phase-based swap decorrelates ties to emulate the three-way pipeline (sub_8736).
-# - Phased stepping: only cops whose `phase == manager_phase` step on this tick (natural separation).
-# - Jail lifecycle: during super, kills park at BR (in_jail=True); on super falling-edge, release
-#   all jailed cops in place and hold one period before movement resumes (visible release).
-#
-# What is provisional (to be tightened with exact constants from the LST)
-# - Roam vs Chase gate: ROM calls a random-direction helper (sub_7986 → sub_56C2/_Random) under a
-#   particular case inside 7A1E. The exact predicate is data-driven; until we lift those constants,
-#   we approximate with a Manhattan distance gate (CHASE_RANGE = 6). Outside that radius cops 
-#   pick a random legal step; within it they use the chase ordering above. This keeps visuals and
-#   difficulty close to the ROM and will be swapped for the table-driven predicate when decoded.
-# ----------------------------------------------------------------------------
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -50,7 +29,7 @@ class Cop:
     spawn_y: int = 0
     last_dir: XY = (0, 0)   # last committed step (dx,dy)
     phase: int = 0          # 0..2; which cohort this cop belongs to
-    aggro: bool = False     # visual/logic hint: True when in chase mode
+    aggro: bool = False     # True when in chase mode
 
     def __post_init__(self) -> None:
         if self.spawn_x == 0 and self.spawn_y == 0:
@@ -101,22 +80,21 @@ class CopManager:
     _cooldown: int = 0
     _super_prev: bool = False
     _phase_counter: int = 0  # 0..2
-    CHASE_RANGE: int = 6     # → replace with LST-driven predicate
+    CHASE_RANGE: int = 6     # provisional; will be replaced by LST-driven predicate
 
-    # simple deterministic LCG for provisional roaming (ROM uses _Random)
+    # deterministic LCG for provisional roaming (ROM uses _Random)
     _rng_state: int = 0x13579BDF
 
     def __post_init__(self) -> None:
         for i, c in enumerate(self.cops):
             c.phase = i % 3
-        # seed based on map footprint so runs are stable per level
+        # seed for stability per level footprint
         w = len(self.grid[0]) if self.grid else 20
         h = len(self.grid)
         self._rng_state ^= (w << 8) ^ (h << 4) ^ len(self.cops)
 
     # ---------- RNG (provisional) ----------
     def _rand(self, n: int) -> int:
-        # LCG 32-bit, return 0..n-1
         self._rng_state = (1103515245 * self._rng_state + 12345) & 0xFFFFFFFF
         return (self._rng_state >> 16) % max(1, n)
 
@@ -139,7 +117,9 @@ class CopManager:
             kills = [c for c in self.cops if (not c.in_jail) and c.pos == player_pos]
             if kills:
                 n = len(kills)
-                ev.points_awarded += on_super_kill_player(player_pos[0], player_pos[1], n_cops_on_tile=n, overlay=self.overlay)
+                ev.points_awarded += on_super_kill_player(
+                    player_pos[0], player_pos[1], n_cops_on_tile=n, overlay=self.overlay
+                )
                 ev.kills_this_tick += n
                 for c in kills:
                     c.send_to_jail(self.overlay, slot_idx=3)
@@ -178,6 +158,7 @@ class CopManager:
                     continue
                 nt = self.grid[ny][nx]
                 if is_passable_runtime("cop", nt, nx, ny, self.overlay):
+                    # Overlap allowed by design
                     c.x, c.y = nx, ny
                     c.last_dir = (nx - ox, ny - oy)
                     break
@@ -207,6 +188,7 @@ class CopManager:
         primary_h = adx >= ady
 
         ahead = (c.x + c.last_dir[0], c.y + c.last_dir[1]) if c.last_dir != (0, 0) else None
+
         def reduces(nx: int, ny: int) -> bool:
             return abs(px - nx) + abs(py - ny) < adx + ady
 
@@ -243,26 +225,30 @@ class CopManager:
             prio[0], prio[1] = prio[1], prio[0]
         return prio
 
-    # ---------- Roaming (provisional; ROM uses sub_7986/_Random) ----------
+    # ---------- Roaming (provisional; ROM uses _Random) ----------
     def _candidate_steps_roam(self, c: Cop) -> Iterable[XY]:
-        # Prefer straight, then left/right, then reverse, but choose a random rotation.
-        ahead = (c.x + c.last_dir[0], c.y + c.last_dir[1]) if c.last_dir != (0, 0) else (c.x, c.y)
-        # 4-neighbors
-        neighbors = [(c.x-1,c.y),(c.x+1,c.y),(c.x,c.y-1),(c.x,c.y+1)]
+        # Prefer straight, then a rotated order of neighbors, with reversal last.
+        if c.last_dir != (0, 0):
+            ahead = (c.x + c.last_dir[0], c.y + c.last_dir[1])
+        else:
+            ahead = (c.x, c.y)
+        neighbors = [(c.x - 1, c.y), (c.x + 1, c.y), (c.x, c.y - 1), (c.x, c.y + 1)]
         k = self._rand(4)
-        rot = neighbors[k:]+neighbors[:k]
+        rot = neighbors[k:] + neighbors[:k]
         order: List[XY] = []
-        if c.last_dir != (0,0):
+        if c.last_dir != (0, 0):
             order.append(ahead)
         order.extend(rot)
-        # Put reversal last
         if c.last_dir != (0, 0):
-            order.append((c.x - c.last_dir[0], c.y - c.last_dir[1]))
+            order.append((c.x - c.last_dir[0], c.y - c.last_dir[1]))  # reversal last
+
         # de-dup
-        seen=set(); uniq: List[XY]=[]
+        seen = set()
+        uniq: List[XY] = []
         for pt in order:
             if pt not in seen:
-                uniq.append(pt); seen.add(pt)
+                uniq.append(pt)
+                seen.add(pt)
         return uniq
 
     # ---------- Helpers ----------

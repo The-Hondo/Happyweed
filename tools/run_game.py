@@ -1,6 +1,6 @@
 # tools/run_game.py
-# Slim pygame runner using engine.state.GameState (modular). Keeps rendering/input here,
-# and all gameplay orchestration in the engine.
+# Slim pygame runner using engine.state.GameState.
+# v12.2: adds --speed (menu speed index) and relies on GameState's prestart/death pauses.
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--fps", type=int, default=60)
     parser.add_argument("--step-ticks", type=int, default=8)
     parser.add_argument("--cop-ticks", type=int, default=10)
+    parser.add_argument("--speed", type=int, default=2, help="menu speed index 0..4 (2=normal)")
     parser.add_argument("--spawn", type=str, default=None, help="x,y override")
     parser.add_argument("--supers", type=str, default=None, help="semicolon list of x,y for L>=21")
     args = parser.parse_args(argv)
@@ -57,6 +58,7 @@ def main(argv: Optional[list] = None) -> int:
         level=args.level,
         player_step_ticks=args.step_ticks,
         cop_step_ticks=args.cop_ticks,
+        menu_speed_index=args.speed,
         spawn_override=spawn_xy,
         super_overrides=super_overrides or None,
     )
@@ -67,11 +69,10 @@ def main(argv: Optional[list] = None) -> int:
     if not pygame.font.get_init():
         pygame.font.init()
 
-    # FIX: Tileset requires tile_size positional arg in your repo
+    # Tileset requires tile_size positional arg in this repo
     try:
         tileset = Tileset(args.tile)
     except TypeError:
-        # Back-compat for alternate signature
         tileset = Tileset(tile_size=args.tile)
 
     tile_px = args.tile
@@ -125,7 +126,6 @@ def main(argv: Optional[list] = None) -> int:
         for y, row in enumerate(state.grid):
             for x, t in enumerate(row):
                 t_draw = FLOOR_SUBSTRATE if t in (60, 61, 62, 63, 65, 66, 67) else t
-                # Exit frame substitution
                 if state.overlay.exit_pos == (x, y):
                     t_draw = state.overlay.exit_frame
                 blit_tile(t_draw, x, y)
@@ -152,10 +152,11 @@ def main(argv: Optional[list] = None) -> int:
 
         # Debug HUD
         leaves_remaining = sum(1 for row in state.grid for t in row if t == 80) + len(state.overlay.cop_spawn_leaf)
+        paused = "PAUSE" if state.paused_ticks > 0 else "run"
         dbg = (
             f"set {args.level_set}-{args.level} pos=({px},{py}) dir={state.player.cur_dir} "
             f"exit={'OPEN' if _out.exit_open else 'closed'} super={'ON' if state.player.super_active else 'off'} "
-            f"spd={state.player.MOVE_PERIOD_TICKS}/{state.copman.move_period_ticks} leaves={leaves_remaining}"
+            f"spd={state.player.MOVE_PERIOD_TICKS}/{state.copman.move_period_ticks} leaves={leaves_remaining} {paused}"
         )
         screen.blit(font.render(dbg, True, (255, 255, 0)), (4, len(state.grid) * tile_px - 18))
 

@@ -1,11 +1,5 @@
 # src/happyweed/engine/state.py
-# Minimal game state orchestration to keep tools/run_game.py slim and modular.
-# Responsibilities here (engine-only, no pygame):
-# - Build grid, overlay, player, cops
-# - Exact exit cadence per LST (delegated to collisions.tick_overlay)
-# - One-time closing at level start; static closed after death; open when leaves==0
-# - Cop reset on death without replanting leaves (preserve left_spawn_once)
-# - Collision parity: death whether cop enters player or player enters cop; super kills
+# GameState orchestrator with prestart/death pauses + TimingModel integration.
 
 from __future__ import annotations
 
@@ -13,7 +7,6 @@ from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple
 
 from ..mapgen.generator import generate_grid
-from ..render.tileset import Tileset  # only for type hints; not used here
 from .player import Player
 from .cop import Cop, CopManager, jail_cells
 from .collisions import (
@@ -24,6 +17,7 @@ from .collisions import (
     exit_is_open,
     on_super_kill_player,
 )
+from .timing import TimingModel, timing_for
 
 XY = Tuple[int, int]
 
@@ -107,14 +101,22 @@ class GameState:
         level_set: int,
         level: int,
         *,
-        player_step_ticks: int = 8,
-        cop_step_ticks: int = 10,
+        player_step_ticks: Optional[int] = None,
+        cop_step_ticks: Optional[int] = None,
+        menu_speed_index: int = 2,
         spawn_override: Optional[XY] = None,
         super_overrides: Optional[Set[XY]] = None,
     ) -> None:
         # Map
         self.grid = generate_grid(level_set, level)
         self.level = level
+
+        # Timing model (scalable)
+        self.timing = timing_for(menu_speed_index)
+        if player_step_ticks is not None:
+            self.timing.player_period = player_step_ticks
+        if cop_step_ticks is not None:
+            self.timing.cop_period = cop_step_ticks
 
         # Overlay
         self.overlay = build_runtime_overlay(self.grid, super_positions=infer_supers(self.grid, level))
@@ -124,22 +126,25 @@ class GameState:
         # Cops
         self.cops = _find_cops(self.grid)
         self.overlay.cop_spawn_leaf = {c.pos for c in self.cops}
-        self.copman = CopManager(grid=self.grid, overlay=self.overlay, cops=self.cops, move_period_ticks=max(1, cop_step_ticks))
+        self.copman = CopManager(grid=self.grid, overlay=self.overlay, cops=self.cops, move_period_ticks=max(1, self.timing.cop_period))
 
         # Player
         spawn_xy = spawn_override or _find_player_spawn_by_tile(self.grid) or _infer_spawn(self.grid)
         self.player = Player(grid=self.grid, overlay=self.overlay, level_index=level, spawn_xy=spawn_xy)
-        self.player.set_move_period(player_step_ticks)
+        self.player.set_move_period(self.timing.player_period)
 
         # Exit FSM flags
-        self._close_armed = True  # one-time closing at level start
-        # Pre-state: show 249, hold until first successful move
+        self._close_armed = True
         if self.overlay.exit_pos is not None:
             self.overlay.exit_frame = 249
             self.overlay.exit_dir = 0
             self.overlay.exit_timer = 1
 
-        # Score / points
+        # Pauses
+        self.paused_ticks = self.timing.prestart_ticks
+        self._blink_accum = 0
+
+        # Score
         self.total_points = 0
 
     # ---- Lifecycle helpers ----
@@ -149,12 +154,19 @@ class GameState:
             self.overlay.exit_dir = 0
             self.overlay.exit_timer = 1
 
+    def _begin_pause(self, ticks: int) -> None:
+        self.paused_ticks = max(0, ticks)
+        # Hold cops one full period after pause to mirror spawn-visibility pause
+        try:
+            self.copman._cooldown = self.copman.move_period_ticks
+        except Exception:
+            pass
+        # Player stays in pre-move phase so input buffers but no steps are taken
+        self.player.pre_move_phase = True
+
     def handle_player_death(self) -> None:
-        # Respawn player
         self.player.force_respawn()
-        # Exit becomes closed & static after death
         self._force_exit_closed_hold()
-        # Reset cops to original spawns WITHOUT recreating objects, preserve left_spawn_once
         try:
             self.copman.reset_on_player_death()
         except Exception:
@@ -162,15 +174,31 @@ class GameState:
                 if hasattr(c, "spawn_x"):
                     c.x, c.y = c.spawn_x, c.spawn_y
                     c.in_jail = False
+        self._begin_pause(self.timing.death_pause_ticks)
 
     # ---- Tick orchestration ----
     def tick(self) -> TickOut:
+        # Paused: only blink sprite + tick overlays for score/jail; no movement
+        if self.paused_ticks > 0:
+            self.paused_ticks -= 1
+            # Blink cadence for player 60↔61 while paused
+            self._blink_accum += 1
+            if self._blink_accum >= self.timing.sprite_blink_period:
+                self._blink_accum = 0
+                if hasattr(self.player, "toggle_idle_frame"):
+                    self.player.toggle_idle_frame()
+            # Keep overlays alive (score timers, etc.), but exit stays static
+            tick_overlay(self.overlay, leaves_remaining=_count_leaves(self.grid, self.overlay), super_active=self.player.super_active, grid=self.grid)
+            return TickOut(exit_open=exit_is_open(self.overlay), points_gained=0)
+
+        # Unpause transitions: enable player stepping
+        self.player.pre_move_phase = False
+
         # 1) Cops step first; may kill player
         cev = self.copman.tick(player_pos=self.player.pos, super_active=self.player.super_active)
         self.total_points += cev.points_awarded
         if cev.player_hit and not self.player.super_active:
             self.handle_player_death()
-            # Do NOT advance overlay timers this frame; present the closed exit immediately
             return TickOut(exit_open=exit_is_open(self.overlay), points_gained=cev.points_awarded)
 
         # 2) Player step

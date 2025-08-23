@@ -1,5 +1,6 @@
 # src/happyweed/engine/state.py
-# GameState orchestrator with prestart/death pauses + TimingModel integration.
+# GameState orchestrator with prestart/death pauses, TimingModel integration,
+# and an exit-open latch so the exit never re-closes after it has opened once.
 
 from __future__ import annotations
 
@@ -134,7 +135,9 @@ class GameState:
         self.player.set_move_period(self.timing.player_period)
 
         # Exit FSM flags
-        self._close_armed = True
+        self._close_armed = True  # one-time closing at level start
+        # Latch: once opened (after collecting all leaves) it must never re-close
+        self.exit_has_opened = False
         if self.overlay.exit_pos is not None:
             self.overlay.exit_frame = 249
             self.overlay.exit_dir = 0
@@ -154,6 +157,12 @@ class GameState:
             self.overlay.exit_dir = 0
             self.overlay.exit_timer = 1
 
+    def _force_exit_open_hold(self) -> None:
+        if self.overlay.exit_pos is not None:
+            self.overlay.exit_frame = 249
+            self.overlay.exit_dir = 0
+            self.overlay.exit_timer = 1
+
     def _begin_pause(self, ticks: int) -> None:
         self.paused_ticks = max(0, ticks)
         # Hold cops one full period after pause to mirror spawn-visibility pause
@@ -166,7 +175,11 @@ class GameState:
 
     def handle_player_death(self) -> None:
         self.player.force_respawn()
-        self._force_exit_closed_hold()
+        # Exit behavior on death: keep it open if it has already opened once this level
+        if self.exit_has_opened:
+            self._force_exit_open_hold()
+        else:
+            self._force_exit_closed_hold()
         try:
             self.copman.reset_on_player_death()
         except Exception:
@@ -231,6 +244,10 @@ class GameState:
                         c.x, c.y = br
 
         # 5) Timers: exit cadence, score FX lifetime, jail BR revert
-        tick_overlay(self.overlay, leaves_remaining=_count_leaves(self.grid, self.overlay), super_active=self.player.super_active, grid=self.grid)
+        leaves_rem = _count_leaves(self.grid, self.overlay)
+        tick_overlay(self.overlay, leaves_remaining=leaves_rem, super_active=self.player.super_active, grid=self.grid)
+        # Latch the "has opened" state: once open with no leaves, never re-close this level
+        if leaves_rem == 0 and self.overlay.exit_frame == 249:
+            self.exit_has_opened = True
 
         return TickOut(exit_open=exit_is_open(self.overlay), points_gained=0)

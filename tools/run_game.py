@@ -1,12 +1,11 @@
 # tools/run_game.py
-# Runtime viewer for the engine Player + overlay tickers + minimal cop kills.
-# - 60 Hz pygame loop
-# - Buffered turning + configurable speed
-# - Exit ticker (engine): premove 249→241 close; open 241→249 when leaves==0
-# - Jail BR overlay (engine): flips 253→254 on first super kill; reverts after super
-# - Score overlays 181..184 (engine) with lifetimes
-# - Minimal cops: created from baked tiles, stationary; if player with super touches
-#   them, they are sent to jail and score overlay appears (single-cop bug preserved).
+# Runtime viewer for Player + overlay tickers + CopManager movement/collisions.
+# v11 fixes:
+# - Cop reset on death preserves each cop's left_spawn_once and never rewrites a leaf.
+#   We ALWAYS reset existing Cop objects back to (spawn_x,spawn_y) and clear in_jail.
+#   No reconstruction of cop list (which used to lose left_spawn_once and replant 80 later).
+# - Exit cadence wired to LST behavior via engine constant EXIT_TICKS_PER_FRAME=1.
+#   Closing happens once at level start; opening once when leaves==0. On death, exit snaps to 241 and holds.
 
 from __future__ import annotations
 
@@ -20,11 +19,10 @@ try:
     from happyweed.mapgen.generator import generate_grid
     from happyweed.render.tileset import Tileset
     from happyweed.engine.player import Player
-    from happyweed.engine.cop import Cop, jail_cells
+    from happyweed.engine.cop import Cop, CopManager, jail_cells
     from happyweed.engine.collisions import (
         FLOOR_SUBSTRATE,
         build_runtime_overlay,
-        premove_exit_flip,
         tick_overlay,
         exit_is_open,
         on_super_kill_player,
@@ -87,7 +85,7 @@ def infer_supers(grid: List[List[int]], level: int) -> Set[XY]:
             for x, t in enumerate(row):
                 if t == 255:
                     positions.add((x, y))
-    return positions  # 21..25 ambiguous; CLI can add
+    return positions
 
 
 def find_cops(grid: List[List[int]]) -> List[Cop]:
@@ -99,15 +97,22 @@ def find_cops(grid: List[List[int]]) -> List[Cop]:
     return cops
 
 
+def count_leaves(grid: List[List[int]], overlay) -> int:
+    visible = sum(1 for row in grid for t in row if t == 80)
+    hidden = len(overlay.cop_spawn_leaf)
+    return visible + hidden
+
+
 # ---------- Main ----------
 
 def main(argv: Optional[list] = None) -> int:
-    parser = argparse.ArgumentParser(description="Happyweed runtime (engine overlay tickers + cop kills)")
+    parser = argparse.ArgumentParser(description="Happyweed runtime (CopManager)")
     parser.add_argument("--set", type=int, default=41, dest="level_set")
     parser.add_argument("--level", type=int, default=1)
     parser.add_argument("--tile", type=int, default=32, help="tile size in pixels")
     parser.add_argument("--fps", type=int, default=60)
     parser.add_argument("--step-ticks", type=int, default=8, help="ticks per tile movement (player speed)")
+    parser.add_argument("--cop-ticks", type=int, default=10, help="ticks per cop movement (lower=faster)")
     parser.add_argument("--spawn", type=str, default=None, help="spawn as x,y (overrides inference)")
     parser.add_argument("--supers", type=str, default=None, help="semicolon-separated list of x,y for super positions (for L>=21)")
     parser.add_argument("--force-exit-frame", type=int, default=None, help="force exit frame 241..249 for rendering")
@@ -175,12 +180,10 @@ def main(argv: Optional[list] = None) -> int:
             except Exception:
                 print(f"Invalid --supers entry: {chunk} (expected x,y)")
 
-    # Cops from baked tiles + hidden-leaf accounting
+    # Cops from baked tiles + manager
     cops = find_cops(grid)
     overlay.cop_spawn_leaf = {c.pos for c in cops}
-
-    # Leaves remaining = visible leaves (80) + hidden leaves under cop spawns
-    leaves_remaining = sum(1 for row in grid for t in row if t == 80) + len(overlay.cop_spawn_leaf)
+    copman = CopManager(grid=grid, overlay=overlay, cops=cops, move_period_ticks=max(1, args.cop_ticks))
 
     # Spawn
     map_spawn = find_player_spawn_by_tile(grid)
@@ -203,9 +206,47 @@ def main(argv: Optional[list] = None) -> int:
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("Consolas", 16)
 
+    # ---- Exit lifecycle flags ----
+    exit_close_armed = True  # only at actual level start
+
+    def arm_exit_for_level_start():
+        nonlocal exit_close_armed
+        if overlay.exit_pos is not None:
+            overlay.exit_frame = 249
+            overlay.exit_dir = 0
+            overlay.exit_timer = 1  # engine uses step-per-loop; set to 1 so first step happens next tick
+        exit_close_armed = True
+
+    def force_exit_closed_hold():
+        if overlay.exit_pos is not None:
+            overlay.exit_frame = 241
+            overlay.exit_dir = 0
+            overlay.exit_timer = 1
+
+    def handle_player_death():
+        # Respawn player
+        player.force_respawn()
+        # Exit should be CLOSED and static after death (no re-closing animation)
+        force_exit_closed_hold()
+        # Reset cops to original spawns WITHOUT recreating objects → preserve left_spawn_once
+        if hasattr(copman, "reset_on_player_death"):
+            try:
+                copman.reset_on_player_death()
+            except Exception:
+                for c in copman.cops:
+                    if hasattr(c, "spawn_x"):
+                        c.x, c.y = c.spawn_x, c.spawn_y
+                        c.in_jail = False
+        else:
+            for c in copman.cops:
+                if hasattr(c, "spawn_x"):
+                    c.x, c.y = c.spawn_x, c.spawn_y
+                    c.in_jail = False
+
+    # Pre-state at level start: show 249 then close once after the level begins
+    arm_exit_for_level_start()
+
     running = True
-    did_premove_flip = False
-    total_points = 0
 
     def draw_map_layer():
         for y in range(h):
@@ -228,6 +269,7 @@ def main(argv: Optional[list] = None) -> int:
                 else:
                     screen.blit(surf, (x * args.tile, y * args.tile))
 
+    # ---------- Main loop ----------
     while running:
         # --- Input ---
         for event in pygame.event.get():
@@ -250,47 +292,55 @@ def main(argv: Optional[list] = None) -> int:
                     player.set_move_period(player.MOVE_PERIOD_TICKS + 1)
                 elif event.key in (pygame.K_RIGHTBRACKET, pygame.K_PERIOD):
                     player.set_move_period(max(1, player.MOVE_PERIOD_TICKS - 1))
-                elif event.key == pygame.K_k:
-                    # Dev helper: simulate a single-cop super kill at player position
-                    if player.super_active:
-                        px, py = player.pos
-                        total_points += on_super_kill_player(px, py, n_cops_on_tile=1, overlay=overlay)
 
-        # --- One-tick game update ---
-        if not did_premove_flip:
-            premove_exit_flip(overlay)
-            did_premove_flip = True
+        # --- Cops step FIRST ---
+        cev = copman.tick(player_pos=player.pos, super_active=player.super_active)
+        if cev.player_hit and not player.super_active:
+            handle_player_death()
+            # Draw a frame immediately to show closed exit (241) after death
+            screen.fill((0, 0, 0))
+            draw_map_layer()
+            pygame.display.flip()
+            clock.tick(args.fps)
+            continue
 
-        # Engine-managed overlay tickers (exit, score overlays, jail BR)
-        tick_overlay(
-            overlay,
-            leaves_remaining=leaves_remaining,
-            super_active=player.super_active,
-            grid=grid,
-        )
-
-        # Determine exit-open state from overlay
+        # --- Exit open state for this tick (before player move) ---
         exit_open = exit_is_open(overlay)
 
+        # --- Player step ---
         ev = player.tick(exit_open=exit_open)
-        if ev.leaf_collected:
-            leaves_remaining = max(0, leaves_remaining - 1)
 
-        # Super kill handling: if player is on any cop tile while super is active, send all cops
-        # on that tile to jail and trigger score overlay. Points only for exactly 1 cop per tile.
-        if player.super_active:
-            px, py = player.pos
-            same_tile = [c for c in cops if c.pos == (px, py)]
-            if same_tile:
-                n = len(same_tile)
-                total_points += on_super_kill_player(px, py, n_cops_on_tile=n, overlay=overlay)
-                # Choose jail slots in order TL, TR, BL, BR then wrap
+        # One-time closing: begin once the actual level begins (you moved at least once)
+        if exit_close_armed and not player.pre_move_phase:
+            if overlay.exit_pos is not None:
+                overlay.exit_dir = -1
+                if overlay.exit_timer <= 0:
+                    overlay.exit_timer = 1
+            exit_close_armed = False
+
+        # --- Overlap collisions AFTER player move ---
+        if not player.super_active:
+            if any((not c.in_jail) and c.pos == player.pos for c in copman.cops):
+                handle_player_death()
+                screen.fill((0, 0, 0))
+                draw_map_layer()
+                pygame.display.flip()
+                clock.tick(args.fps)
+                continue
+        else:
+            overlapping = [c for c in copman.cops if (not c.in_jail) and c.pos == player.pos]
+            if overlapping:
+                n = len(overlapping)
+                _ = on_super_kill_player(player.pos[0], player.pos[1], n_cops_on_tile=n, overlay=overlay)
                 cells = jail_cells(overlay)
-                for idx, cop in enumerate(same_tile):
-                    cop.send_to_jail(overlay, slot_idx=(idx % max(1, len(cells))))
+                br = cells[-1] if cells else None
+                for c in overlapping:
+                    c.send_to_jail(overlay, slot_idx=3)
+                    if br:
+                        c.x, c.y = br
 
-        # Release-from-jail mechanic after super ends (minimal: keep them in jail for now)
-        # Future: add timers or exit pathing here.
+        # --- Tick overlay timers at the END to reflect any resets/armings above ---
+        tick_overlay(overlay, leaves_remaining=count_leaves(grid, overlay), super_active=player.super_active, grid=grid)
 
         # --- Rendering ---
         screen.fill((0, 0, 0))
@@ -310,14 +360,12 @@ def main(argv: Optional[list] = None) -> int:
             if jsurf is not None:
                 screen.blit(jsurf, (jx * args.tile, jy * args.tile))
 
-        # Draw cops (stationary): jailed cops render inside jail; others at their positions
-        jail_tiles = set(jail_cells(overlay))
-        for cop in cops:
+        # Draw cops (moving): hide jailed cops during super; otherwise draw at their positions
+        for cop in copman.cops:
+            if cop.in_jail and player.super_active:
+                continue
             cx, cy = cop.pos
             ctile = 65 if player.super_active else 66
-            # If cop is in jail, force-draw at their jail coordinate
-            if cop.in_jail:
-                ctile = 65  # frozen look
             csurf = tileset.get(ctile)
             if csurf is not None:
                 screen.blit(csurf, (cx * args.tile, cy * args.tile))
@@ -333,10 +381,11 @@ def main(argv: Optional[list] = None) -> int:
             screen.blit(psurf, (px * args.tile, py * args.tile))
 
         # HUD: tiny debug
+        leaves_remaining_dbg = count_leaves(grid, overlay)
         dbg = (
             f"set {args.level_set}-{args.level} pos=({px},{py}) dir={player.cur_dir} "
-            f"exit={'OPEN' if exit_open else 'closed'} super={'ON' if player.super_active else 'off'} "
-            f"spd={player.MOVE_PERIOD_TICKS}t/step leaves={leaves_remaining} pts={total_points}"
+            f"exit={'OPEN' if exit_is_open(overlay) else 'closed'} super={'ON' if player.super_active else 'off'} "
+            f"spd={player.MOVE_PERIOD_TICKS}/{copman.move_period_ticks} leaves={leaves_remaining_dbg}"
         )
         dbg_surf = font.render(dbg, True, (255, 255, 0))
         screen.blit(dbg_surf, (4, h * args.tile - 18))

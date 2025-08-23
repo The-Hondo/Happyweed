@@ -1,0 +1,4 @@
+
+[viewer]
+pygame>=2.5
+pillow>=10.0

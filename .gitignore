@@ -13,6 +13,7 @@ out/
 data/golden_levels/**/.DS_Store
 *.xlsx
 *.zip
+tests
 
 # IDE
 .idea/
